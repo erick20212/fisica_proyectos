@@ -152,6 +152,34 @@ export function calcularCampoElectrico(
   return campoTotal;
 }
 
+/** Dirección del campo total; null en singularidades o cancelación numérica.
+ * La tolerancia es relativa a las contribuciones, no a la magnitud en N/C:
+ * una carga pequeña sigue teniendo una dirección física bien definida.
+ */
+export function direccionCampoElectrico(
+  punto: Vector3D,
+  cargas: CargaElectrica[]
+): Vector3D | null {
+  validarCargas(cargas);
+  let campo = { x: 0, y: 0, z: 0 };
+  let escala = 0;
+  try {
+    for (const carga of cargas) {
+      const contribucion = calcularCampoCarga(punto, carga);
+      campo = sumarVectores(campo, contribucion);
+      escala += magnitud(contribucion);
+    }
+  } catch {
+    return null;
+  }
+  const modulo = magnitud(campo);
+  if (!Number.isFinite(modulo) || !Number.isFinite(escala) ||
+      modulo <= 64 * Number.EPSILON * escala || modulo === 0) {
+    return null;
+  }
+  return multiplicarVector(campo, 1 / modulo);
+}
+
 /**
  * Retorna el campo eléctrico junto con
  * su intensidad y posición de consulta.

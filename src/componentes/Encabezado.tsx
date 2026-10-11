@@ -8,7 +8,7 @@ export default function Encabezado() {
 
         <div>
           <h1 className="text-sm font-bold tracking-[0.15em] text-white">
-            NEXUS PHYSICS
+            Erick Quichua
           </h1>
           <p className="text-[10px] tracking-widest text-cyan-400/70">
             LABORATORIO VIRTUAL 3D

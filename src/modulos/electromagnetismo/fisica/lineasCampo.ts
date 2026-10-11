@@ -5,7 +5,8 @@ import type {
   Vector3D,
 } from "../tipos";
 
-import { calcularCampoElectrico } from "./campoElectrico";
+import { CONSTANTE_COULOMB, direccionCampoElectrico, validarCargas } from "./campoElectrico";
+import { calcularPotencialElectrico } from "./potencialElectrico";
 
 export interface ConfiguracionLineas {
   modo: ModoVisualizacion;
@@ -93,25 +94,20 @@ function direccionCampo(
   cargas: CargaElectrica[],
   sentido: number
 ): Vector3D | null {
-  try {
-    const campo = calcularCampoElectrico(
-      posicion,
-      cargas
-    );
+  const direccion = direccionCampoElectrico(posicion, cargas);
+  return direccion ? escalar(direccion, sentido) : null;
+}
 
-    const modulo = longitud(campo);
+function productoEscalar(a: Vector3D, b: Vector3D): number {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
 
-    if (
-      !Number.isFinite(modulo) ||
-      modulo < 1e-12
-    ) {
-      return null;
-    }
-
-    return escalar(campo, sentido / modulo);
-  } catch {
-    return null;
-  }
+// Radios disjuntos incluso si el usuario acerca mucho dos cargas.
+function radioCarga(carga: CargaElectrica, cargas: CargaElectrica[], radio: number): number {
+  const otras = cargas.filter((otra) => otra !== carga && otra.valor !== 0)
+    .map((otra) => distancia(carga.posicion, otra.posicion))
+    .filter((separacion) => separacion > 0);
+  return Math.min(radio, ...otras.map((separacion) => separacion * 0.2));
 }
 
 // =====================================
@@ -181,16 +177,27 @@ export function trazarLineaCampo(
 ): Vector3D[] {
   const puntos: Vector3D[] = [{ ...origen }];
   let actual = { ...origen };
+  if (sentido !== 1 && sentido !== -1) throw new Error("El sentido debe ser +1 o -1.");
+  validarCargas(cargas);
+  if (Math.max(Math.abs(origen.x), Math.abs(origen.y), Math.abs(origen.z)) > configuracion.limiteEspacio) return [];
 
   const destinos = cargas.filter(
     (carga) => carga.valor * sentido < 0
   );
+  const radios = destinos.map((carga) => radioCarga(carga, cargas, configuracion.radioDetencion));
+  let potencial: number;
+  try {
+    potencial = calcularPotencialElectrico(actual, cargas);
+  } catch {
+    return [];
+  }
 
   for (
     let i = 0;
     i < configuracion.maximoPasos;
     i++
   ) {
+    if (destinos.some((carga, indice) => distancia(actual, carga.posicion) <= radios[indice])) break;
     // Reducimos el paso cerca de las cargas
     // para evitar saltar sobre singularidades.
     let paso = configuracion.paso;
@@ -206,19 +213,39 @@ export function trazarLineaCampo(
 
       paso = Math.min(
         paso,
-        Math.max(
-          configuracion.paso * 0.1,
-          distanciaMinima * 0.2
-        )
+        distanciaMinima * 0.2
       );
     }
 
-    const siguiente = integrarRK4(
-      actual,
-      cargas,
-      sentido,
-      paso
-    );
+    // Cerca de separatrices y puntos nulos, un paso fijo puede atravesar
+    // el equilibrio y crear zigzags. Reducimos el paso hasta resolver E.
+    let siguiente: Vector3D | null = null;
+    let siguientePotencial = potencial;
+    const direccionInicial = direccionCampo(actual, cargas, sentido);
+    if (!direccionInicial) break;
+    for (let intento = 0; intento < 18 && paso > 1e-10; intento++, paso /= 2) {
+      const candidato = integrarRK4(actual, cargas, sentido, paso);
+      if (!candidato) continue;
+      const tangente = normalizar(restar(candidato, actual));
+      const direccionFinal = direccionCampo(candidato, cargas, sentido);
+      const medio = escalar(sumar(actual, candidato), 0.5);
+      const direccionMedia = direccionCampo(medio, cargas, sentido);
+      if (!direccionFinal || !direccionMedia ||
+          productoEscalar(tangente, direccionInicial) < 0.995 ||
+          productoEscalar(tangente, direccionFinal) < 0.995 ||
+          productoEscalar(tangente, direccionMedia) < 0.995) continue;
+      try {
+        siguientePotencial = calcularPotencialElectrico(candidato, cargas);
+      } catch {
+        continue;
+      }
+      // E = -grad V: el potencial desciende estrictamente siguiendo E.
+      // Esto también impide aceptar bucles numéricos cerrados.
+      if (!Number.isFinite(siguientePotencial) ||
+          sentido * (potencial - siguientePotencial) <= 0) continue;
+      siguiente = candidato;
+      break;
+    }
 
     if (!siguiente) break;
 
@@ -232,9 +259,9 @@ export function trazarLineaCampo(
 
     // Detectar llegada a una carga destino.
     const destino = destinos.find(
-      (carga) =>
+      (carga, indice) =>
         distancia(siguiente, carga.posicion) <=
-        configuracion.radioDetencion
+        radios[indice]
     );
 
     if (destino) {
@@ -251,14 +278,26 @@ export function trazarLineaCampo(
       Math.abs(siguiente.z) >
         configuracion.limiteEspacio;
 
-    if (fuera) break;
+    if (fuera) {
+      const desplazamiento = restar(siguiente, actual);
+      let factor = 1;
+      for (const eje of ["x", "y", "z"] as const) {
+        if (Math.abs(siguiente[eje]) > configuracion.limiteEspacio) {
+          const borde = Math.sign(siguiente[eje]) * configuracion.limiteEspacio;
+          factor = Math.min(factor, (borde - actual[eje]) / desplazamiento[eje]);
+        }
+      }
+      puntos.push(sumar(actual, escalar(desplazamiento, factor)));
+      break;
+    }
 
-    if (distancia(actual, siguiente) < 1e-8) {
+    if (distancia(actual, siguiente) < 1e-10) {
       break;
     }
 
     puntos.push(siguiente);
     actual = siguiente;
+    potencial = siguientePotencial;
   }
 
   return puntos;
@@ -321,27 +360,12 @@ function generarDireccionesDipolo(
 
     // Ángulos simétricos respecto al eje
     // que conecta las dos cargas.
-    const mitad = Math.floor(cantidad / 2);
-
-    direcciones.push(ejePlano);
-
-    for (let i = 1; i <= mitad; i++) {
-      const angulo =
-        0.12 + (i / mitad) * 1.25;
-
-      for (const signo of [-1, 1]) {
-        direcciones.push(
-          normalizar(
-            sumar(
-              escalar(ejePlano, Math.cos(angulo)),
-              escalar(
-                perpendicular,
-                signo * Math.sin(angulo)
-              )
-            )
-          )
-        );
-      }
+    for (let i = 0; i < cantidad; i++) {
+      const angulo = 2 * Math.PI * i / cantidad;
+      direcciones.push(sumar(
+        escalar(ejePlano, Math.cos(angulo)),
+        escalar(perpendicular, Math.sin(angulo))
+      ));
     }
 
     return direcciones.slice(0, cantidad);
@@ -352,22 +376,23 @@ function generarDireccionesDipolo(
   const cantidadAnillos = 4;
 
   const azimutsPorAnillo = Math.max(
-    4,
-    Math.ceil(
-      (cantidad - 1) / cantidadAnillos
+    1,
+    Math.floor(
+      (cantidad - 2) / cantidadAnillos
     )
   );
 
   // Línea central que une ambas cargas.
   direcciones.push(eje);
+  direcciones.push(escalar(eje, -1));
 
   for (
     let anillo = 0;
     anillo < cantidadAnillos;
     anillo++
   ) {
-    const anguloPolar =
-      0.28 + anillo * 0.28;
+    // Toda la esfera: también las líneas que salen por detrás del dipolo.
+    const anguloPolar = Math.acos(1 - 2 * (anillo + 0.5) / cantidadAnillos);
 
     for (
       let j = 0;
@@ -461,6 +486,7 @@ export function generarLineasCampo(
   configuracion: ConfiguracionLineas =
     CONFIGURACION_LINEAS
 ): Vector3D[][] {
+  validarCargas(cargas);
   if (cargas.length === 0) return [];
 
   if (
@@ -482,6 +508,23 @@ export function generarLineasCampo(
     );
   }
 
+  // Fuentes coincidentes equivalen a una carga con la suma algebraica.
+  // No cambiamos el estado ni las esferas; solo evitamos sembrar líneas
+  // ficticias alrededor de cargas que se cancelan en el mismo punto.
+  const agrupadas: CargaElectrica[] = [];
+  for (const carga of cargas) {
+    const existente = agrupadas.find((otra) => distancia(otra.posicion, carga.posicion) === 0);
+    if (existente) existente.valor += carga.valor;
+    else agrupadas.push({ ...carga, posicion: { ...carga.posicion } });
+  }
+  cargas = agrupadas.filter((carga) => carga.valor !== 0);
+  configuracion = {
+    ...configuracion,
+    limiteEspacio: Math.max(configuracion.limiteEspacio,
+      ...cargas.map((carga) => Math.max(
+        Math.abs(carga.posicion.x), Math.abs(carga.posicion.y), Math.abs(carga.posicion.z)
+      ) + 1)),
+  };
   const positivas = cargas.filter(
     (carga) => carga.valor > 0
   );
@@ -490,12 +533,9 @@ export function generarLineasCampo(
     (carga) => carga.valor < 0
   );
 
-  const soloNegativas =
-    positivas.length === 0;
-
-  const origenes = soloNegativas
-    ? negativas
-    : positivas;
+  // Sembramos también en negativas; en configuraciones mixtas conservamos
+  // sus trazados inversos solo si proceden del borde, sin duplicar conexiones.
+  const origenes = [...positivas, ...negativas];
 
   if (origenes.length === 0) return [];
 
@@ -545,8 +585,8 @@ export function generarLineasCampo(
     const direcciones =
       esDipolo
         ? generarDireccionesDipolo(
-            positivas[0],
-            negativas[0],
+            carga,
+            carga.valor > 0 ? negativas[0] : positivas[0],
             cantidad,
             configuracion.modo
           )
@@ -555,24 +595,33 @@ export function generarLineasCampo(
             configuracion.modo
           );
 
-    const sentido = soloNegativas ? -1 : 1;
+    const sentido = carga.valor > 0 ? 1 : -1;
+    let radioInicio = radioCarga(carga, cargas, configuracion.radioInicio);
+    // La carga débil debe dominar E en sus propias semillas, aunque esté
+    // cerca de otra de magnitud muy superior.
+    const fondo = cargas.filter((otra) => otra !== carga).reduce((suma, otra) => {
+      const r = distancia(carga.posicion, otra.posicion);
+      return suma + CONSTANTE_COULOMB * Math.abs(otra.valor) / (r * r);
+    }, 0);
+    if (fondo > 0) radioInicio = Math.min(radioInicio,
+      Math.sqrt(CONSTANTE_COULOMB * Math.abs(carga.valor) / (100 * fondo)));
 
     for (const direccion of direcciones) {
       const origen: Vector3D = {
         x:
           carga.posicion.x +
           direccion.x *
-            configuracion.radioInicio,
+            radioInicio,
         y:
           carga.posicion.y +
           direccion.y *
-            configuracion.radioInicio,
+            radioInicio,
         z:
           configuracion.modo === "2D"
             ? 0
             : carga.posicion.z +
               direccion.z *
-                configuracion.radioInicio,
+                radioInicio,
       };
 
       const puntos = trazarLineaCampo(
@@ -584,10 +633,12 @@ export function generarLineasCampo(
 
       if (puntos.length < 3) continue;
 
-      // En el caso de cargas negativas aisladas,
-      // invertimos la línea para que los puntos
-      // estén ordenados en dirección de E.
-      if (soloNegativas) {
+      if (sentido < 0) {
+        const ultimo = puntos[puntos.length - 1];
+        const llegaAlBorde = Math.max(Math.abs(ultimo.x), Math.abs(ultimo.y), Math.abs(ultimo.z)) >=
+          configuracion.limiteEspacio - 1e-8;
+        if (positivas.length > 0 && !llegaAlBorde) continue;
+        // Trazamos contra E para encontrar el origen, luego ordenamos con E.
         puntos.reverse();
       }
 

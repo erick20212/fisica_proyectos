@@ -6,6 +6,7 @@ import Encabezado from "./componentes/Encabezado";
 import Menu from "./componentes/Menu";
 
 import Electromagnetismo from "./modulos/electromagnetismo/Electromagnetismo";
+import Capacitorores from "./modulos/capacitorores/Capacitorores";
 import Inicio from "./inicio";
 
 export default function App() {
@@ -40,6 +41,7 @@ export default function App() {
         {unidadActual === "electromagnetismo" && (
           <Electromagnetismo />
         )}
+        {unidadActual === "capacitorores" && <Capacitorores />}
       </main>
     </div>
   );

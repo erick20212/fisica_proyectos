@@ -4,8 +4,9 @@ import { useFrame } from "@react-three/fiber";
 import { Line } from "@react-three/drei";
 import * as THREE from "three";
 
-import type { Particula, Vector3D } from "../tipos";
+import type { Particula } from "../tipos";
 import type { ResultadoTrayectoria } from "../fisica/trayectoria";
+import { interpolarPosicion } from "../fisica/trayectoria";
 
 interface Propiedades {
   particula: Particula;
@@ -15,63 +16,6 @@ interface Propiedades {
   reinicio?: number;
   mostrarTrayectoria?: boolean;
   alFinalizar?: () => void;
-}
-
-/**
- * Obtiene la posición interpolada de la partícula
- * para un tiempo determinado.
- *
- * Utiliza los tiempos calculados por el motor físico.
- */
-function interpolarPosicion(
-  trayectoria: ResultadoTrayectoria,
-  tiempo: number
-): Vector3D {
-  const { puntos, tiempos } = trayectoria;
-
-  if (puntos.length === 0) {
-    return { x: 0, y: 0, z: 0 };
-  }
-
-  if (tiempo <= 0 || puntos.length === 1) {
-    return puntos[0];
-  }
-
-  const ultimo = tiempos.length - 1;
-
-  if (tiempo >= tiempos[ultimo]) {
-    return puntos[ultimo];
-  }
-
-  // Búsqueda binaria del intervalo temporal.
-  let izquierda = 0;
-  let derecha = ultimo;
-
-  while (derecha - izquierda > 1) {
-    const medio = Math.floor(
-      (izquierda + derecha) / 2
-    );
-
-    if (tiempos[medio] <= tiempo) {
-      izquierda = medio;
-    } else {
-      derecha = medio;
-    }
-  }
-
-  const t0 = tiempos[izquierda];
-  const t1 = tiempos[derecha];
-
-  const factor = (tiempo - t0) / (t1 - t0);
-
-  const a = puntos[izquierda];
-  const b = puntos[derecha];
-
-  return {
-    x: a.x + (b.x - a.x) * factor,
-    y: a.y + (b.y - a.y) * factor,
-    z: a.z + (b.z - a.z) * factor,
-  };
 }
 
 /**
@@ -96,6 +40,8 @@ export default function Particula3D({
   const ultimoReinicio = useRef(reinicio);
   const trayectoriaAnterior = useRef(trayectoria);
   const finalNotificado = useRef(false);
+  const reproduccionAnterior = useRef(false);
+  const primerFotograma = useRef(true);
 
   const color =
     particula.carga > 0
@@ -107,7 +53,10 @@ export default function Particula3D({
   const puntosLinea = useMemo(() => {
     if (!trayectoria) return [];
 
-    return trayectoria.puntos.map(
+    return trayectoria.puntos.filter((punto, indice, puntos) => {
+      const anterior = puntos[indice - 1];
+      return !anterior || punto.x !== anterior.x || punto.y !== anterior.y || punto.z !== anterior.z;
+    }).map(
       (punto): [number, number, number] => [
         punto.x,
         punto.y,
@@ -118,6 +67,12 @@ export default function Particula3D({
 
   useFrame((_, delta) => {
     if (!grupo.current) return;
+
+    const reiniciada = primerFotograma.current || ultimoReinicio.current !== reinicio ||
+      trayectoriaAnterior.current !== trayectoria;
+    primerFotograma.current = false;
+    const iniciaReproduccion = reproduciendo && !reproduccionAnterior.current;
+    reproduccionAnterior.current = reproduciendo;
 
     if (
       ultimoReinicio.current !== reinicio ||
@@ -141,7 +96,14 @@ export default function Particula3D({
     const tiempoFinal =
       trayectoria.tiempos[trayectoria.tiempos.length - 1];
 
-    if (reproduciendo && !finalNotificado.current) {
+    const repetir = iniciaReproduccion && finalNotificado.current;
+    if (repetir) {
+      tiempoActual.current = 0;
+      finalNotificado.current = false;
+    }
+
+    // El primer fotograma de un lanzamiento/reinicio muestra exactamente t=0.
+    if (reproduciendo && !finalNotificado.current && !reiniciada && !repetir) {
       tiempoActual.current = Math.min(
         tiempoFinal,
         tiempoActual.current +

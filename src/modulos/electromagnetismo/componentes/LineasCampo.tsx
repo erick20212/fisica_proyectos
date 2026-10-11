@@ -2,6 +2,7 @@
 import { useMemo } from "react";
 import { Line } from "@react-three/drei";
 import * as THREE from "three";
+import { direccionCampoElectrico } from "../fisica/campoElectrico";
 
 import type {
   CargaElectrica,
@@ -92,7 +93,8 @@ function calcularDistancias(
 function crearFlecha(
   puntos: Vector3D[],
   distancias: number[],
-  progreso: number
+  progreso: number,
+  cargas: CargaElectrica[]
 ): FlechaPreparada | null {
   if (puntos.length < 2) return null;
 
@@ -145,13 +147,17 @@ function crearFlecha(
     )
   );
 
-  // La tangente sigue el orden físico
-  // de los puntos, de + hacia -.
-  const direccion = new THREE.Vector3(
+  // Siempre E total en la posición de la flecha: nunca una carga destino.
+  const campo = direccionCampoElectrico(posicion, cargas);
+  if (!campo) return null;
+  const direccion = new THREE.Vector3(campo.x, campo.y, campo.z);
+  const tangente = new THREE.Vector3(
     siguiente.x - anterior.x,
     siguiente.y - anterior.y,
     siguiente.z - anterior.z
   ).normalize();
+  // Un tramo que no representa bien E no debe recibir una flecha engañosa.
+  if (tangente.dot(direccion) < 0.99) return null;
 
   const rotacion =
     new THREE.Quaternion().setFromUnitVectors(
@@ -262,7 +268,8 @@ export default function LineasCampo({
             crearFlecha(
               puntos,
               distancias,
-              progreso
+              progreso,
+              cargas
             )
           )
           .filter(

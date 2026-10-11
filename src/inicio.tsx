@@ -1,5 +1,5 @@
 
-import { Zap } from "lucide-react";
+import { BatteryCharging, Zap } from "lucide-react";
 import Card from "./componentes/card";
 
 
@@ -16,6 +16,14 @@ const unidades = [
       "Explora cargas puntuales, campos eléctricos, superficies equipotenciales y trayectorias de partículas mediante simulaciones 3D.",
     modulos: 3,
     icono: Zap,
+  },
+  {
+    id: "capacitorores",
+    numero: 2,
+    titulo: "Capacitores y almacenamiento de energía",
+    descripcion: "Experimenta con un capacitor de placas paralelas: modifica su geometría, dieléctrico y batería y observa sus propiedades eléctricas en 2D.",
+    modulos: 1,
+    icono: BatteryCharging,
   },
 ];
 

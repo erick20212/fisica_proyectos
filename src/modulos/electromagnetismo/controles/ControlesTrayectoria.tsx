@@ -22,7 +22,6 @@ import type {
 
 import {
   simularTrayectoria,
-  CONFIGURACION_TRAYECTORIA,
 } from "../fisica/trayectoria";
 
 interface Propiedades {
@@ -44,6 +43,8 @@ interface Propiedades {
   cambiarVelocidadReproduccion: (valor: number) => void;
 
   reiniciarAnimacion: () => void;
+  configuracion: ConfiguracionTrayectoria;
+  cambiarConfiguracion: (configuracion: ConfiguracionTrayectoria) => void;
 }
 
 export default function ControlesTrayectoria({
@@ -58,12 +59,9 @@ export default function ControlesTrayectoria({
   velocidadReproduccion,
   cambiarVelocidadReproduccion,
   reiniciarAnimacion,
+  configuracion,
+  cambiarConfiguracion,
 }: Propiedades) {
-  const [configuracion, setConfiguracion] =
-    useState<ConfiguracionTrayectoria>({
-      ...CONFIGURACION_TRAYECTORIA,
-    });
-
   const [error, setError] = useState<string | null>(null);
 
   const [calculando, setCalculando] = useState(false);
@@ -121,10 +119,10 @@ export default function ControlesTrayectoria({
 
     if (!Number.isFinite(numero)) return;
 
-    setConfiguracion((anterior) => ({
-      ...anterior,
+    cambiarConfiguracion({
+      ...configuracion,
       [campo]: numero,
-    }));
+    });
 
     invalidarTrayectoria();
   }
@@ -259,7 +257,7 @@ export default function ControlesTrayectoria({
             <input
               type="number"
               min="0"
-              step="0.001"
+              step="any"
               value={particula.masa}
               onChange={(e) =>
                 actualizarParticula("masa", e.target.value)
@@ -352,7 +350,7 @@ export default function ControlesTrayectoria({
 
         <div className="grid grid-cols-2 gap-3">
           <label className="text-xs text-slate-400">
-            Paso temporal (s)
+            Paso temporal máximo (s)
 
             <input
               type="number"
@@ -389,8 +387,8 @@ export default function ControlesTrayectoria({
         </div>
 
         <p className="mt-3 text-xs leading-5 text-slate-500">
-          RK4 calcula la evolución física usando el
-          paso temporal seleccionado.
+          RK4 reduce el paso cuando hace falta precisión. La velocidad
+          de reproducción solo cambia la animación.
         </p>
       </section>
 
@@ -500,6 +498,19 @@ export default function ControlesTrayectoria({
             Finalización:{" "}
             {trayectoria.motivoFinalizacion.replaceAll("_", " ")}
           </p>
+          {trayectoria.errorRelativoEnergiaMaximo !== undefined && (
+            <p className="mt-2 text-xs text-slate-400"
+              title="Variación de K + qV respecto al inicio, dividida por K inicial más la suma de magnitudes de las energías potenciales iniciales.">
+              Variación máxima de energía:{" "}
+              {(trayectoria.errorRelativoEnergiaMaximo * 100).toExponential(2)} %
+            </p>
+          )}
+          {trayectoria.motivoFinalizacion === "maximo_pasos" && (
+            <p className="mt-3 text-xs text-amber-300">
+              Se alcanzó el límite de pasos antes de completar la duración.
+              Reduce la duración o revisa el paso máximo.
+            </p>
+          )}
         </section>
       )}
 

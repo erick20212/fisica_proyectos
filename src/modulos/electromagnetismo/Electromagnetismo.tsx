@@ -23,7 +23,9 @@ import type {
 
 import type {
   ResultadoTrayectoria,
+  ConfiguracionTrayectoria,
 } from "./fisica/trayectoria";
+import { CONFIGURACION_TRAYECTORIA } from "./fisica/trayectoria";
 
 // ========================================
 // CONFIGURACIONES INICIALES
@@ -132,6 +134,8 @@ export default function Electromagnetismo() {
 
   const [trayectoria, setTrayectoria] =
     useState<ResultadoTrayectoria | null>(null);
+  const [configuracionTrayectoria, setConfiguracionTrayectoria] =
+    useState<ConfiguracionTrayectoria>({ ...CONFIGURACION_TRAYECTORIA });
 
   const [reproduciendo, setReproduciendo] =
     useState(false);
@@ -488,6 +492,8 @@ export default function Electromagnetismo() {
 
           {modulo === "trayectoria" && (
             <ControlesTrayectoria
+              configuracion={configuracionTrayectoria}
+              cambiarConfiguracion={setConfiguracionTrayectoria}
               cargas={cargas}
               modo={modo}
               particula={particula}

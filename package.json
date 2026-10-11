@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "test": "node --test src/modulos/electromagnetismo/fisica/trayectoria.test.cjs src/modulos/capacitorores/fisica/capacitor.test.cjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -16,6 +16,7 @@ import {
   calcularCampoElectrico,
   validarCargas,
 } from "./campoElectrico";
+import { calcularPotencialElectrico, calcularPotencialCarga } from "./potencialElectrico";
 
 /**
  * Configuración del simulador de trayectoria.
@@ -29,6 +30,9 @@ export interface ConfiguracionTrayectoria {
   maximoPasos: number;
   limiteEspacio: number;    // Metros
   radioColision: number;    // Metros
+  toleranciaRelativa?: number;
+  toleranciaPosicion?: number; // Metros
+  toleranciaVelocidad?: number; // m/s
 }
 
 /**
@@ -46,6 +50,15 @@ export const CONFIGURACION_TRAYECTORIA:
     radioColision: 0.05,
   };
 
+// Control local por comparación RK4(dt) con dos RK4(dt/2), error / 15.
+// No garantiza un error global universal: comprobar convergencia y energía.
+export const TOLERANCIAS_TRAYECTORIA = {
+  relativa: 1e-10,
+  posicion: 1e-11,
+  velocidad: 1e-11,
+  evento: 1e-8, // m: resolución espacial de colisiones y del borde
+} as const;
+
 /**
  * Resultado de una simulación completa.
  */
@@ -53,6 +66,8 @@ export interface ResultadoTrayectoria {
   puntos: Vector3D[];
   velocidades: Vector3D[];
   tiempos: number[];
+  energiaInicial?: number; // J
+  errorRelativoEnergiaMaximo?: number;
   motivoFinalizacion:
     | "tiempo_maximo"
     | "limite_espacio"
@@ -106,15 +121,55 @@ export function calcularAceleracion(
   particula: Particula,
   cargas: CargaElectrica[]
 ): Vector3D {
+  // Una partícula neutra no necesita evaluar un campo singular para qE=0.
+  if (particula.carga === 0) return { x: 0, y: 0, z: 0 };
   const campo = calcularCampoElectrico(
     posicion,
     cargas
   );
 
-  return multiplicarVector(
+  const aceleracion = multiplicarVector(
     campo,
     particula.carga / particula.masa
   );
+  if (!Object.values(aceleracion).every(Number.isFinite)) {
+    throw new Error("La aceleración excede la precisión numérica disponible.");
+  }
+  return aceleracion;
+}
+
+export function calcularEnergiaMecanica(particula: Particula, cargas: CargaElectrica[]): number {
+  const cinetica = 0.5 * particula.masa * magnitud(particula.velocidad) ** 2;
+  const potencial = particula.carga === 0 ? 0 :
+    particula.carga * calcularPotencialElectrico(particula.posicion, cargas);
+  const energia = cinetica + potencial;
+  if (!Number.isFinite(energia)) throw new Error("La energía no es finita.");
+  return energia;
+}
+
+/** Interpolación temporal de las muestras físicas, incluso con dt variable. */
+export function interpolarPosicion(trayectoria: ResultadoTrayectoria, tiempo: number): Vector3D {
+  const { puntos, tiempos } = trayectoria;
+  if (puntos.length === 0) return { x: 0, y: 0, z: 0 };
+  if (tiempo <= tiempos[0] || puntos.length === 1) return puntos[0];
+  const ultimo = puntos.length - 1;
+  if (tiempo >= tiempos[ultimo]) return puntos[ultimo];
+  let izquierda = 0;
+  let derecha = ultimo;
+  while (derecha - izquierda > 1) {
+    const medio = Math.floor((izquierda + derecha) / 2);
+    if (tiempos[medio] <= tiempo) izquierda = medio;
+    else derecha = medio;
+  }
+  const intervalo = tiempos[derecha] - tiempos[izquierda];
+  const factor = intervalo > 0 ? (tiempo - tiempos[izquierda]) / intervalo : 0;
+  const a = puntos[izquierda];
+  const b = puntos[derecha];
+  return {
+    x: a.x + (b.x - a.x) * factor,
+    y: a.y + (b.y - a.y) * factor,
+    z: a.z + (b.z - a.z) * factor,
+  };
 }
 
 /**
@@ -247,11 +302,13 @@ export function avanzarParticula(
     )
   );
 
-  return {
+  const siguiente: Particula = {
     ...particula,
     posicion: nuevaPosicion,
     velocidad: nuevaVelocidad,
   };
+  if (!estadoFinito(siguiente)) throw new Error("El paso RK4 produjo un estado no finito.");
+  return siguiente;
 }
 
 /**
@@ -268,6 +325,61 @@ function detectarColision(
       carga.valor !== 0 &&
       distancia(posicion, carga.posicion) <= radio
   );
+}
+
+interface EventoTrayectoria {
+  factor: number;
+  motivo: "colision" | "limite_espacio";
+}
+
+/** Primera intersección del segmento con una esfera: entrada o salida. */
+function interseccionEsfera(a: Vector3D, b: Vector3D, centro: Vector3D,
+  radio: number, salida = false): number | null {
+  const d = { x: b.x - a.x, y: b.y - a.y, z: b.z - a.z };
+  const r = { x: a.x - centro.x, y: a.y - centro.y, z: a.z - centro.z };
+  const aa = d.x * d.x + d.y * d.y + d.z * d.z;
+  if (aa === 0) return null;
+  const bb = 2 * (r.x * d.x + r.y * d.y + r.z * d.z);
+  const cc = r.x * r.x + r.y * r.y + r.z * r.z - radio * radio;
+  const discriminante = bb * bb - 4 * aa * cc;
+  if (discriminante < 0) return null;
+  const raiz = Math.sqrt(discriminante);
+  // Forma estable: evita restar dos números casi iguales.
+  const q = -0.5 * (bb + (bb >= 0 ? raiz : -raiz));
+  const raices = q === 0 ? [-bb / (2 * aa)] : [q / aa, cc / q];
+  const factor = salida ? Math.max(...raices) : Math.min(...raices);
+  return factor >= 0 && factor <= 1 ? factor : null;
+}
+
+function primerEvento(a: Vector3D, b: Vector3D, cargas: CargaElectrica[],
+  configuracion: ConfiguracionTrayectoria): EventoTrayectoria | null {
+  let evento: EventoTrayectoria | null = null;
+  for (const carga of cargas) {
+    if (carga.valor === 0) continue;
+    const factor = interseccionEsfera(a, b, carga.posicion, configuracion.radioColision);
+    if (factor !== null && (!evento || factor < evento.factor)) evento = { factor, motivo: "colision" };
+  }
+  const borde = interseccionEsfera(a, b, { x: 0, y: 0, z: 0 }, configuracion.limiteEspacio, true);
+  if (borde !== null && (!evento || borde < evento.factor)) evento = { factor: borde, motivo: "limite_espacio" };
+  return evento;
+}
+
+function estadoFinito(particula: Particula): boolean {
+  return [...Object.values(particula.posicion), ...Object.values(particula.velocidad)]
+    .every(Number.isFinite);
+}
+
+function errorRK4(completo: Particula, fino: Particula, inicial: Particula,
+  relativa: number, absolutaPosicion: number, absolutaVelocidad: number): number {
+  let error = 0;
+  for (const campo of ["posicion", "velocidad"] as const) {
+    const absoluta = campo === "posicion" ? absolutaPosicion : absolutaVelocidad;
+    for (const eje of ["x", "y", "z"] as const) {
+      const escala = absoluta + relativa * Math.max(Math.abs(inicial[campo][eje]), Math.abs(fino[campo][eje]));
+      error = Math.max(error, Math.abs(fino[campo][eje] - completo[campo][eje]) / (15 * escala));
+    }
+  }
+  return error;
 }
 
 /**
@@ -310,113 +422,158 @@ export function simularTrayectoria(
     );
   }
 
+  const relativa = configuracion.toleranciaRelativa ?? TOLERANCIAS_TRAYECTORIA.relativa;
+  const absolutaPosicion = configuracion.toleranciaPosicion ?? TOLERANCIAS_TRAYECTORIA.posicion;
+  const absolutaVelocidad = configuracion.toleranciaVelocidad ?? TOLERANCIAS_TRAYECTORIA.velocidad;
+  if (![relativa, absolutaPosicion, absolutaVelocidad].every((v) => Number.isFinite(v) && v > 0)) {
+    throw new Error("Las tolerancias deben ser finitas y positivas.");
+  }
   let actual: Particula = {
     ...particulaInicial,
     posicion: { ...particulaInicial.posicion },
     velocidad: { ...particulaInicial.velocidad },
   };
+  const resultado: ResultadoTrayectoria = {
+    puntos: [{ ...actual.posicion }],
+    velocidades: [{ ...actual.velocidad }],
+    tiempos: [0],
+    motivoFinalizacion: "maximo_pasos",
+  };
+  if (detectarColision(actual.posicion, cargas, radioColision)) {
+    resultado.motivoFinalizacion = "colision";
+    return resultado;
+  }
+  if (magnitud(actual.posicion) > limiteEspacio) {
+    resultado.motivoFinalizacion = "limite_espacio";
+    return resultado;
+  }
 
-  const puntos: Vector3D[] = [
-    { ...actual.posicion },
-  ];
+  let escalaEnergia: number;
+  try {
+    resultado.energiaInicial = calcularEnergiaMecanica(actual, cargas);
+    // Escala positiva incluso si K y U, o potenciales opuestos, se cancelan.
+    escalaEnergia = 0.5 * actual.masa * magnitud(actual.velocidad) ** 2;
+    if (actual.carga !== 0) for (const carga of cargas) {
+      escalaEnergia += Math.abs(actual.carga * calcularPotencialCarga(actual.posicion, carga));
+    }
+    escalaEnergia = Math.max(escalaEnergia, Number.MIN_VALUE);
+    if (!Number.isFinite(escalaEnergia)) throw new Error("Escala de energía no finita.");
+    resultado.errorRelativoEnergiaMaximo = 0;
+    // Equilibrio exacto de un sistema autónomo: no hay que fabricar movimiento.
+    if (magnitud(actual.velocidad) === 0 && magnitud(calcularAceleracion(actual.posicion, actual, cargas)) === 0) {
+      resultado.puntos.push({ ...actual.posicion });
+      resultado.velocidades.push({ ...actual.velocidad });
+      resultado.tiempos.push(tiempoMaximo);
+      resultado.motivoFinalizacion = "tiempo_maximo";
+      return resultado;
+    }
+  } catch {
+    resultado.motivoFinalizacion = "error_numerico";
+    return resultado;
+  }
 
-  const velocidades: Vector3D[] = [
-    { ...actual.velocidad },
-  ];
-
-  const tiempos: number[] = [0];
+  function guardar(estado: Particula, t: number): boolean {
+    if (t <= resultado.tiempos[resultado.tiempos.length - 1]) return false;
+    const energia = calcularEnergiaMecanica(estado, cargas);
+    const errorEnergia = Math.abs(energia - resultado.energiaInicial!) / escalaEnergia;
+    if (!Number.isFinite(errorEnergia)) throw new Error("Error de energía no finito.");
+    resultado.errorRelativoEnergiaMaximo = Math.max(resultado.errorRelativoEnergiaMaximo!, errorEnergia);
+    resultado.puntos.push({ ...estado.posicion });
+    resultado.velocidades.push({ ...estado.velocidad });
+    resultado.tiempos.push(t);
+    return true;
+  }
 
   let tiempo = 0;
-
-  let motivoFinalizacion:
-    ResultadoTrayectoria["motivoFinalizacion"] =
-      "maximo_pasos";
-
-  if (
-    detectarColision(
-      actual.posicion,
-      cargas,
-      radioColision
-    )
-  ) {
-    return {
-      puntos,
-      velocidades,
-      tiempos,
-      motivoFinalizacion: "colision",
-    };
-  }
-
+  let compensacionTiempo = 0;
+  let proximoPaso = pasoTiempo;
   for (let i = 0; i < maximoPasos; i++) {
-    const dt = Math.min(
-      pasoTiempo,
-      tiempoMaximo - tiempo
-    );
-
-    if (dt <= 0) {
-      motivoFinalizacion = "tiempo_maximo";
+    const restante = tiempoMaximo - tiempo;
+    const resolucionTiempo = 32 * Number.EPSILON * Math.max(tiempoMaximo, tiempo, Number.MIN_VALUE);
+    if (restante <= resolucionTiempo) {
+      resultado.tiempos[resultado.tiempos.length - 1] = tiempoMaximo;
+      resultado.motivoFinalizacion = "tiempo_maximo";
       break;
     }
-
-    let siguiente: Particula;
-
+    let dt = Math.min(proximoPaso, restante);
+    let medio: Particula | null = null;
+    let siguiente: Particula | null = null;
+    let error = Infinity;
     try {
-      siguiente = avanzarParticula(
-        actual,
-        cargas,
-        dt
-      );
+      const aceleracion = magnitud(calcularAceleracion(actual.posicion, actual, cargas));
+      const rapidez = magnitud(actual.velocidad);
+      // Impide que las etapas RK4 salten sobre la singularidad de una fuente.
+      for (const carga of cargas) {
+        if (carga.valor === 0) continue;
+        const r = distancia(actual.posicion, carga.posicion);
+        const ritmo = rapidez + Math.sqrt(aceleracion * r);
+        if (ritmo > 0) dt = Math.min(dt, 0.2 * r / ritmo);
+        const alcance = rapidez * dt + 0.5 * aceleracion * dt * dt;
+        if (r - radioColision <= 2 * alcance && aceleracion > 0) {
+          // Cerca de una posible colisión limitamos también el error del
+          // segmento usado para localizar el contacto (sin suavizar Coulomb).
+          dt = Math.min(dt, Math.sqrt(TOLERANCIAS_TRAYECTORIA.evento / aceleracion));
+        }
+      }
+      const alcanceBorde = rapidez * dt + 0.5 * aceleracion * dt * dt;
+      if (limiteEspacio - magnitud(actual.posicion) <= 2 * alcanceBorde && aceleracion > 0) {
+        dt = Math.min(dt, Math.sqrt(TOLERANCIAS_TRAYECTORIA.evento / aceleracion));
+      }
+      for (let intento = 0; intento < 32 && dt > resolucionTiempo; intento++) {
+        try {
+          const completo = avanzarParticula(actual, cargas, dt);
+          const mitad = avanzarParticula(actual, cargas, dt / 2);
+          const fino = avanzarParticula(mitad, cargas, dt / 2);
+          error = estadoFinito(completo) && estadoFinito(mitad) && estadoFinito(fino)
+            ? errorRK4(completo, fino, actual, relativa, absolutaPosicion, absolutaVelocidad) : Infinity;
+          if (error <= 1) {
+            medio = mitad;
+            siguiente = fino;
+            break;
+          }
+        } catch {
+          error = Infinity;
+        }
+        dt *= Number.isFinite(error) ? Math.max(0.1, Math.min(0.5, 0.9 * error ** -0.2)) : 0.5;
+      }
+      if (!medio || !siguiente) throw new Error("No se pudo resolver el paso con la precisión solicitada.");
+
+      // Revisamos ambos semipasos: una carga puede cruzarse aunque los
+      // extremos del paso estén fuera del radio de colisión.
+      let inicioTramo = actual;
+      let tiempoTramo = tiempo;
+      // Suma compensada: 10000 pasos de 0.001 s deben completar 10 s,
+      // sin consumir un paso extra únicamente por error de acumulación.
+      const incrementoTiempo = dt - compensacionTiempo;
+      const tiempoSiguiente = tiempo + incrementoTiempo;
+      compensacionTiempo = (tiempoSiguiente - tiempo) - incrementoTiempo;
+      for (const finTramo of [medio, siguiente]) {
+        const evento = primerEvento(inicioTramo.posicion, finTramo.posicion, cargas, configuracion);
+        if (evento) {
+          const dtEvento = dt / 2 * evento.factor;
+          const contacto = dtEvento > 0 ? avanzarParticula(inicioTramo, cargas, dtEvento) : inicioTramo;
+          if (!estadoFinito(contacto)) throw new Error("Contacto no finito.");
+          guardar(contacto, tiempoTramo + dtEvento);
+          resultado.motivoFinalizacion = evento.motivo;
+          return resultado;
+        }
+        tiempoTramo = finTramo === medio ? tiempo + dt / 2 : tiempoSiguiente;
+        guardar(finTramo, tiempoTramo);
+        inicioTramo = finTramo;
+      }
+      actual = siguiente;
+      tiempo = tiempoSiguiente;
+      // Evita un falso maximo_pasos por redondeo al llegar al tiempo final.
+      if (tiempoMaximo - tiempo <= resolucionTiempo) {
+        resultado.tiempos[resultado.tiempos.length - 1] = tiempoMaximo;
+        resultado.motivoFinalizacion = "tiempo_maximo";
+        break;
+      }
+      proximoPaso = Math.min(pasoTiempo, dt * (error > 0 ? Math.min(2, Math.max(0.2, 0.9 * error ** -0.2)) : 2));
     } catch {
-      motivoFinalizacion = "error_numerico";
-      break;
-    }
-
-    const valores = [
-      ...Object.values(siguiente.posicion),
-      ...Object.values(siguiente.velocidad),
-    ];
-
-    if (valores.some((v) => !Number.isFinite(v))) {
-      motivoFinalizacion = "error_numerico";
-      break;
-    }
-
-    tiempo += dt;
-
-    puntos.push({ ...siguiente.posicion });
-    velocidades.push({ ...siguiente.velocidad });
-    tiempos.push(tiempo);
-
-    actual = siguiente;
-
-    if (
-      detectarColision(
-        actual.posicion,
-        cargas,
-        radioColision
-      )
-    ) {
-      motivoFinalizacion = "colision";
-      break;
-    }
-
-    if (
-      magnitud(actual.posicion) > limiteEspacio
-    ) {
-      motivoFinalizacion = "limite_espacio";
-      break;
-    }
-
-    if (tiempo >= tiempoMaximo) {
-      motivoFinalizacion = "tiempo_maximo";
+      resultado.motivoFinalizacion = "error_numerico";
       break;
     }
   }
-
-  return {
-    puntos,
-    velocidades,
-    tiempos,
-    motivoFinalizacion,
-  };
+  return resultado;
 }

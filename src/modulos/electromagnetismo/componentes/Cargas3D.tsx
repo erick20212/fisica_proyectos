@@ -1,9 +1,8 @@
 
-import { useRef } from "react";
-import { useFrame } from "@react-three/fiber";
+import { useCallback, useEffect, useRef } from "react";
+import { useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import {
   Html,
-  TransformControls,
 } from "@react-three/drei";
 import * as THREE from "three";
 
@@ -26,6 +25,7 @@ interface Propiedades {
     id: string,
     posicion: Vector3D
   ) => void;
+  cambiarArrastre?: (activo: boolean) => void;
 }
 
 // Colores distintos dentro de cada polaridad.
@@ -72,6 +72,8 @@ interface PropiedadesCarga {
   mostrarEtiqueta: boolean;
   seleccionar: () => void;
   mover: (posicion: Vector3D) => void;
+  interactiva: boolean;
+  cambiarArrastre?: (activo: boolean) => void;
 }
 
 /**
@@ -83,14 +85,12 @@ function ModeloCarga({
   color,
   seleccionada,
   mostrarEtiqueta,
-  seleccionar,
 }: Pick<
   PropiedadesCarga,
   | "carga"
   | "color"
   | "seleccionada"
   | "mostrarEtiqueta"
-  | "seleccionar"
 >) {
   const visual = useRef<THREE.Group>(null);
   const anilloPrincipal = useRef<THREE.Mesh>(null);
@@ -122,12 +122,7 @@ function ModeloCarga({
     <group>
       <group ref={visual}>
         {/* Esfera seleccionable */}
-        <mesh
-          onClick={(evento) => {
-            evento.stopPropagation();
-            seleccionar();
-          }}
-        >
+        <mesh>
           <sphereGeometry args={[0.15, 32, 32]} />
           <meshBasicMaterial
             color={color}
@@ -136,12 +131,7 @@ function ModeloCarga({
         </mesh>
 
         {/* Halo */}
-        <mesh
-          onClick={(evento) => {
-            evento.stopPropagation();
-            seleccionar();
-          }}
-        >
+        <mesh raycast={() => {}}>
           <sphereGeometry args={[0.23, 32, 32]} />
           <meshBasicMaterial
             color={color}
@@ -154,6 +144,7 @@ function ModeloCarga({
 
         {/* Anillo principal */}
         <mesh
+          raycast={() => {}}
           ref={anilloPrincipal}
           rotation={[Math.PI / 2, 0, 0]}
         >
@@ -170,6 +161,7 @@ function ModeloCarga({
 
         {/* Anillo secundario */}
         <mesh
+          raycast={() => {}}
           ref={anilloSecundario}
           rotation={[0, Math.PI / 3, 0]}
         >
@@ -186,7 +178,7 @@ function ModeloCarga({
 
         {/* Resaltado de selección */}
         {seleccionada && (
-          <mesh>
+          <mesh raycast={() => {}}>
             <sphereGeometry args={[0.4, 24, 24]} />
             <meshBasicMaterial
               color={color}
@@ -232,71 +224,117 @@ function ModeloCarga({
  * Una carga con sus controles de movimiento.
  */
 function CargaInteractiva({
-  carga,
-  color,
-  modo,
-  seleccionada,
-  mostrarEtiqueta,
-  seleccionar,
-  mover,
+  carga, color, modo, seleccionada, mostrarEtiqueta,
+  seleccionar, mover, interactiva, cambiarArrastre,
 }: PropiedadesCarga) {
-  const grupo = useRef<THREE.Group>(null);
+  const { camera, controls, gl } = useThree();
+  const arrastre = useRef<{
+    pointerId: number;
+    target: Pick<Element, "hasPointerCapture" | "setPointerCapture" | "releasePointerCapture">;
+    plano: THREE.Plane;
+    inicio: THREE.Vector3;
+    posicion: THREE.Vector3;
+    profundidad: boolean;
+    clientY: number;
+    metrosPorPixel: number;
+    controles: { enabled: boolean } | null;
+    habilitados: boolean;
+    cursor: string;
+  } | null>(null);
 
-  const posicion: [
-    number,
-    number,
-    number
-  ] = [
-    carga.posicion.x,
-    carga.posicion.y,
-    modo === "2D" ? 0 : carga.posicion.z,
-  ];
+  const finalizar = useCallback(() => {
+    const actual = arrastre.current;
+    if (!actual) return;
+    arrastre.current = null;
+    if (actual.controles) actual.controles.enabled = actual.habilitados;
+    gl.domElement.style.setProperty("cursor", actual.cursor);
+    if (actual.target.hasPointerCapture(actual.pointerId)) {
+      actual.target.releasePointerCapture(actual.pointerId);
+    }
+    cambiarArrastre?.(false);
+  }, [gl, cambiarArrastre]);
 
-  function actualizarPosicion() {
-    if (!grupo.current) return;
-
-    const siguiente: Vector3D = {
-      x: grupo.current.position.x,
-      y: grupo.current.position.y,
-      z:
-        modo === "2D"
-          ? 0
-          : grupo.current.position.z,
+  // Cancelación, pérdida de captura y desmontaje usan la misma limpieza.
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const terminar = () => finalizar();
+    canvas.addEventListener("lostpointercapture", terminar);
+    canvas.addEventListener("pointercancel", terminar);
+    return () => {
+      canvas.removeEventListener("lostpointercapture", terminar);
+      canvas.removeEventListener("pointercancel", terminar);
+      terminar();
     };
+  }, [gl, finalizar]);
 
-    mover(siguiente);
+  function iniciar(evento: ThreeEvent<PointerEvent>) {
+    if (!interactiva || evento.button !== 0 || arrastre.current) return;
+    evento.stopPropagation();
+    const posicion = new THREE.Vector3(
+      carga.posicion.x, carga.posicion.y, modo === "2D" ? 0 : carga.posicion.z
+    );
+    const normal = modo === "2D"
+      ? new THREE.Vector3(0, 0, 1)
+      : camera.getWorldDirection(new THREE.Vector3());
+    const plano = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, posicion);
+    const inicio = evento.ray.intersectPlane(plano, new THREE.Vector3());
+    if (!inicio) return;
+    const controles = controls && "enabled" in controls
+      ? controls as unknown as { enabled: boolean } : null;
+    // Escala de pantalla en metros, incluso con cámara rotada o zoom.
+    const profundidadCamara = Math.abs(posicion.clone().sub(camera.position).dot(normal));
+    const altura = camera instanceof THREE.PerspectiveCamera
+      ? 2 * profundidadCamara * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / camera.zoom
+      : camera instanceof THREE.OrthographicCamera
+        ? (camera.top - camera.bottom) / camera.zoom : 1;
+    arrastre.current = {
+      pointerId: evento.pointerId,
+      target: evento.currentTarget as unknown as Pick<Element, "hasPointerCapture" | "setPointerCapture" | "releasePointerCapture">,
+      plano, inicio, posicion,
+      profundidad: modo === "3D" && evento.shiftKey,
+      clientY: evento.clientY,
+      metrosPorPixel: altura / Math.max(1, gl.domElement.clientHeight),
+      controles, habilitados: controles?.enabled ?? true,
+      cursor: gl.domElement.style.cursor,
+    };
+    // OrbitControls es un objeto externo mutable, no estado de React.
+    if (controles) Object.assign(controles, { enabled: false });
+    arrastre.current.target.setPointerCapture(evento.pointerId);
+    gl.domElement.style.setProperty("cursor", "grabbing");
+    seleccionar();
+    cambiarArrastre?.(true);
   }
 
-  const modelo = (
-    <group
-      ref={grupo}
-      position={posicion}
-    >
-      <ModeloCarga
-        carga={carga}
-        color={color}
-        seleccionada={seleccionada}
-        mostrarEtiqueta={mostrarEtiqueta}
-        seleccionar={seleccionar}
-      />
-    </group>
-  );
-
-  if (!seleccionada) {
-    return modelo;
+  function desplazar(evento: ThreeEvent<PointerEvent>) {
+    const actual = arrastre.current;
+    if (!actual || evento.pointerId !== actual.pointerId) return;
+    evento.stopPropagation();
+    const siguiente = actual.posicion.clone();
+    if (actual.profundidad) {
+      siguiente.z += (actual.clientY - evento.clientY) * actual.metrosPorPixel;
+    } else {
+      const punto = evento.ray.intersectPlane(actual.plano, new THREE.Vector3());
+      if (!punto) return;
+      siguiente.add(punto.sub(actual.inicio));
+    }
+    mover({ x: siguiente.x, y: siguiente.y, z: modo === "2D" ? 0 : siguiente.z });
   }
 
   return (
-    <TransformControls
-      mode="translate"
-      size={0.75}
-      showX
-      showY
-      showZ={modo === "3D"}
-      onObjectChange={actualizarPosicion}
+    <group
+      position={[carga.posicion.x, carga.posicion.y, modo === "2D" ? 0 : carga.posicion.z]}
+      onPointerDown={iniciar}
+      onPointerMove={desplazar}
+      onPointerUp={(evento) => {
+        if (arrastre.current?.pointerId !== evento.pointerId) return;
+        desplazar(evento);
+        evento.stopPropagation();
+        finalizar();
+      }}
     >
-      {modelo}
-    </TransformControls>
+      <ModeloCarga carga={carga} color={color} seleccionada={seleccionada}
+        mostrarEtiqueta={mostrarEtiqueta} />
+    </group>
   );
 }
 
@@ -310,12 +348,15 @@ export default function Cargas3D({
   cargaSeleccionada = null,
   seleccionarCarga,
   moverCarga,
+  cambiarArrastre,
 }: Propiedades) {
   return (
     <group>
       {cargas.slice(0, 10).map((carga, indice) => (
         <CargaInteractiva
           key={carga.id}
+          interactiva={Boolean(moverCarga)}
+          cambiarArrastre={cambiarArrastre}
           carga={carga}
           color={obtenerColor(carga.valor, indice)}
           modo={modo}

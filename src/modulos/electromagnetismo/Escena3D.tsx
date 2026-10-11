@@ -1,4 +1,5 @@
 
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 
 import {
@@ -133,6 +134,28 @@ export default function Escena3D({
   alFinalizar,
 }: Propiedades) {
   const es2D = modo === "2D";
+  const [arrastrando, setArrastrando] = useState(false);
+  const [cargasGeometria, setCargasGeometria] = useState(cargas);
+  const ultimasCargas = useRef(cargas);
+  useEffect(() => {
+    ultimasCargas.current = cargas;
+  }, [cargas]);
+  const cambiarArrastre = useCallback((activo: boolean) => {
+    // Cada arrastre comienza con la distribución actual, sin volver durante
+    // el primer intervalo a la geometría de un arrastre anterior.
+    if (activo) setCargasGeometria(ultimasCargas.current);
+    setArrastrando(activo);
+  }, []);
+  useEffect(() => {
+    if (!arrastrando) return;
+    const temporizador = window.setInterval(() => {
+      setCargasGeometria(ultimasCargas.current);
+    }, 120);
+    return () => window.clearInterval(temporizador);
+  }, [arrastrando]);
+  // Las esferas y el panel usan el estado inmediato; la geometría costosa
+  // se actualiza a frecuencia limitada y vuelve a calidad completa al soltar.
+  const cargasCampo = arrastrando ? cargasGeometria : cargas;
 
   // Densidad adaptativa de líneas de campo.
   const densidadLineas =
@@ -201,17 +224,18 @@ export default function Escena3D({
           modo={modo}
           mostrarEtiquetas
           cargaSeleccionada={cargaSeleccionada}
-          seleccionarCarga={seleccionarCarga}
-          moverCarga={moverCarga}
+          seleccionarCarga={modulo === "cargas" ? seleccionarCarga : undefined}
+          moverCarga={modulo === "cargas" ? moverCarga : undefined}
+          cambiarArrastre={cambiarArrastre}
         />
 
         {/* Líneas de campo con flechas */}
         {mostrarLineas &&
           modulo !== "trayectoria" && (
             <LineasCampo
-              cargas={cargas}
+              cargas={cargasCampo}
               modo={modo}
-              densidad={densidadLineas}
+              densidad={arrastrando ? 8 : densidadLineas}
             />
           )}
 
@@ -219,7 +243,7 @@ export default function Escena3D({
         {mostrarEquipotenciales &&
           modulo !== "trayectoria" && (
             <Equipotenciales
-              cargas={cargas}
+              cargas={cargasCampo}
               modo={modo}
               visible
               opacidad={0.18}
@@ -295,6 +319,11 @@ export default function Escena3D({
               ? "Consulta de potencial eléctrico"
               : "Movimiento de partículas cargadas"}
         </p>
+        {modulo === "cargas" && (
+          <p className="mt-2 text-xs text-cyan-200">
+            Arrastra una esfera para moverla{es2D ? " en XY" : "; Shift + arrastre vertical para Z"}.
+          </p>
+        )}
       </div>
     </div>
   );
