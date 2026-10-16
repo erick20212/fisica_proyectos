@@ -1,5 +1,5 @@
 
-import { BatteryCharging, Zap } from "lucide-react";
+import { BatteryCharging, CircuitBoard, Zap } from "lucide-react";
 import Card from "./componentes/card";
 
 
@@ -24,6 +24,14 @@ const unidades = [
     descripcion: "Experimenta con un capacitor de placas paralelas: modifica su geometría, dieléctrico y batería y observa sus propiedades eléctricas en 2D.",
     modulos: 1,
     icono: BatteryCharging,
+  },
+  {
+    id: "corriente-electrica",
+    numero: 3,
+    titulo: "Corriente eléctrica",
+    descripcion: "Arma circuitos con resistencias en serie, paralelo y mixto. Calcula corriente, voltaje y potencia y explora la ley de Ohm en tiempo real.",
+    modulos: 2,
+    icono: CircuitBoard,
   },
 ];
 

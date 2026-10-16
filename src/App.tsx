@@ -7,6 +7,7 @@ import Menu from "./componentes/Menu";
 
 import Electromagnetismo from "./modulos/electromagnetismo/Electromagnetismo";
 import Capacitorores from "./modulos/capacitorores/Capacitorores";
+import CorrienteElectrica from "./modulos/corriente electrica/CorrienteElectrica";
 import Inicio from "./inicio";
 
 export default function App() {
@@ -42,6 +43,7 @@ export default function App() {
           <Electromagnetismo />
         )}
         {unidadActual === "capacitorores" && <Capacitorores />}
+        {unidadActual === "corriente-electrica" && <CorrienteElectrica />}
       </main>
     </div>
   );

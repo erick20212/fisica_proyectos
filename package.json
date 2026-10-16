@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "node --test src/modulos/electromagnetismo/fisica/trayectoria.test.cjs src/modulos/capacitorores/fisica/capacitor.test.cjs",
+    "test": "node --test src/modulos/electromagnetismo/fisica/trayectoria.test.cjs src/modulos/capacitorores/fisica/capacitor.test.cjs \"src/modulos/corriente electrica/fisica/circuitos.test.cjs\" \"src/modulos/corriente electrica/fisica/redElectrica.test.cjs\" \"src/modulos/corriente electrica/fisica/editor.test.cjs\"",
     "preview": "vite preview"
   },
   "dependencies": {
